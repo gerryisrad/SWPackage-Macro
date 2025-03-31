@@ -1,0 +1,147 @@
+Option Explicit
+
+' ========================================================
+' Function to extract revision from drawing
+'Author: Gerardo Gutierrez
+' ========================================================
+Function GetLatestRevisionFromDrawing(swDraw As SldWorks.DrawingDoc) As String
+    Dim revisionTable As Object
+    Dim revTableAnnotation As Object
+    Dim rowCount As Long, colCount As Long
+    Dim revNumber As String
+    Dim maxRev As Double
+    Dim i As Integer
+    
+    ' Check for custom property "Revision"
+    revNumber = swDraw.CustomInfo2("", "Revision")
+    If revNumber <> "" Then
+        GetLatestRevisionFromDrawing = "Rev" & revNumber
+        Exit Function
+    End If
+    
+    ' Fallback: Scan revision table (column 0)
+    Set revisionTable = swDraw.revisionTable
+    If Not revisionTable Is Nothing Then
+        revisionTable.GetTableAnnotations revTableAnnotation
+        If Not revTableAnnotation Is Nothing Then
+            revisionTable.GetTableRowColumnCount rowCount, colCount
+            maxRev = 0
+            For i = 1 To rowCount - 1
+                revNumber = revisionTable.GetText(i, 0)
+                If IsNumeric(revNumber) Then
+                    If CDbl(revNumber) > maxRev Then maxRev = CDbl(revNumber)
+                End If
+            Next i
+            GetLatestRevisionFromDrawing = "Rev" & CStr(maxRev) & ".0"
+        Else
+            GetLatestRevisionFromDrawing = "Rev0.0"
+        End If
+    Else
+        GetLatestRevisionFromDrawing = "Rev0.0"
+    End If
+End Function
+
+' ========================================================
+' Folder picker (no Office dependency)
+' ========================================================
+Function GetParentFolderPath() As String
+    Dim shellApp As Object
+    Dim folder As Object
+    
+    Set shellApp = CreateObject("Shell.Application")
+    Set folder = shellApp.BrowseForFolder(0, "Select Parent Folder (e.g., Products/Phobos/...)", 0, "C:\")
+    
+    If Not folder Is Nothing Then
+        GetParentFolderPath = folder.Self.Path & "\"
+    Else
+        GetParentFolderPath = ""
+    End If
+End Function
+
+' ========================================================
+' Main macro
+' ========================================================
+Sub ExportDrawingsToCustomFolders()
+    Dim swApp As SldWorks.SldWorks
+    Dim swModel As SldWorks.ModelDoc2
+    Dim swAssembly As SldWorks.AssemblyDoc
+    Dim swComponent As SldWorks.Component2
+    Dim swDraw As SldWorks.DrawingDoc
+    Dim vComponents As Variant
+    Dim i As Integer
+    Dim partName As String, revision As String
+    Dim drawingPath As String, pdfPath As String
+    Dim parentFolder As String, partFolder As String
+    Dim errors As Long, warnings As Long
+    Dim dotPosition As Integer
+    
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
+    
+    ' Get parent folder
+    parentFolder = GetParentFolderPath()
+    If parentFolder = "" Then Exit Sub
+    
+    If Not swModel Is Nothing Then
+        If swModel.GetType = 2 Then ' 2 = swDocASSEMBLY
+            Set swAssembly = swModel
+            vComponents = swAssembly.GetComponents(False)
+            
+            For i = 0 To UBound(vComponents)
+                Set swComponent = vComponents(i)
+                
+                ' Skip virtual/unsaved components
+                If swComponent.IsVirtual Then
+                    MsgBox "Skipping virtual component: " & swComponent.Name2, vbExclamation
+                    GoTo NextComponent
+                End If
+                
+                ' Extract part name from the full file path
+                partName = swComponent.GetPathName()
+                If partName <> "" Then
+                    partName = Mid(partName, InStrRev(partName, "\") + 1) ' Extract filename
+                    dotPosition = InStrRev(partName, ".") ' Remove file extension
+                    If dotPosition > 0 Then partName = Left(partName, dotPosition - 1)
+                End If
+                
+                ' Sanitize part name
+                partName = Replace(partName, "/", "_")
+                partName = Replace(partName, ":", "_")
+                
+                ' Get drawing path
+                drawingPath = Replace(swComponent.GetPathName(), ".SLDPRT", ".SLDDRW")
+                
+                If Dir(drawingPath) <> "" Then
+                    ' Create part folder
+                    partFolder = parentFolder & partName & "\"
+                    If Dir(partFolder, vbDirectory) = "" Then MkDir partFolder
+                    
+                    ' Open drawing
+                    Set swDraw = swApp.OpenDoc6(drawingPath, 3, 0, "", errors, warnings)
+                    If swDraw Is Nothing Then
+                        MsgBox "Failed to open drawing: " & drawingPath, vbCritical
+                        GoTo NextComponent
+                    End If
+                    
+                    ' Get revision
+                    revision = GetLatestRevisionFromDrawing(swDraw)
+                    revision = Replace(revision, "/", ".")
+                    revision = Replace(revision, " ", "")
+                    
+                    ' Save PDF using SaveAs3
+                    pdfPath = partFolder & partName & "-" & revision & ".pdf"
+                    swDraw.Extension.SaveAs pdfPath, 0, 1, Nothing, errors, warnings
+                    swApp.CloseDoc drawingPath
+                Else
+                    MsgBox "Drawing not found: " & drawingPath, vbExclamation
+                End If
+
+NextComponent:
+            Next i
+            MsgBox "PDFs saved to: " & parentFolder
+        Else
+            MsgBox "Open an assembly document first!", vbCritical
+        End If
+    End If
+End Sub
+
